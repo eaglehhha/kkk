@@ -26,9 +26,9 @@ jobs:
       - name: 设置环境
         run: |
           echo "REPO_URL=https://api.github.com/repos/bia-pain-bache/BPB-Worker-Panel/releases" >> $GITHUB_ENV
-          echo "TARGET_FILE=worker.zip" >> $GITHUB_ENV
 
       - name: 检查并更新 Worker
+        id: check_update
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 使用 GitHub Token 认证
         run: |
@@ -50,13 +50,29 @@ jobs:
           fi
 
           TAG_NAME=$(echo "$RESPONSE" | jq -r '.[0].tag_name')
-          DOWNLOAD_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name == "'"$TARGET_FILE"'") | .browser_download_url')
+          
+          # 尝试同时获取 zip 和 js 文件的下载链接
+          ZIP_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name == "worker.zip") | .browser_download_url')
+          JS_URL=$(echo "$RESPONSE" | jq -r '.[0].assets[] | select(.name == "worker.js") | .browser_download_url')
 
-          if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" == "null" ]; then
-            log "ERROR: 未找到 $TARGET_FILE"
+          # 优先级调整：优先锁定 zip 文件
+          if [ -n "$ZIP_URL" ] && [ "$ZIP_URL" != "null" ]; then
+            DOWNLOAD_URL="$ZIP_URL"
+            FILE_EXT="zip"
+            log "检测到上游发布了 worker.zip，优先使用"
+          elif [ -n "$JS_URL" ] && [ "$JS_URL" != "null" ]; then
+            DOWNLOAD_URL="$JS_URL"
+            FILE_EXT="js"
+            log "未找到 worker.zip，回退使用独立的 worker.js"
+          else
+            log "ERROR: 未找到 worker.zip 或 worker.js"
             exit 1
           fi
+
           log "最新版本: $TAG_NAME"
+          
+          # 记录版本号供后续步骤使用
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
 
           # 判断是否需要更新
           FORCE_UPDATE=${{ github.event.inputs.force_update || 'false' }}
@@ -65,12 +81,25 @@ jobs:
             exit 0
           fi
 
-          # 下载并更新
-          log "下载 $TARGET_FILE..."
-          wget -q -O "$TARGET_FILE" "$DOWNLOAD_URL"
-          log "解压 $TARGET_FILE..."
-          unzip -o "$TARGET_FILE"
-          rm "$TARGET_FILE"
+          # 根据文件类型执行不同的更新逻辑
+          if [ "$FILE_EXT" = "zip" ]; then
+            log "下载 worker.zip..."
+            wget -q -O "worker.zip" "$DOWNLOAD_URL"
+            
+            log "解压 worker.zip..."
+            unzip -o "worker.zip"
+            
+            # 如果解压出来的是 worker.js（无下划线），则重命名适配 Cloudflare Pages
+            if [ -f "worker.js" ]; then
+              mv worker.js _worker.js
+            fi
+            
+            rm "worker.zip"
+          else
+            log "下载 worker.js 并直接保存为 _worker.js..."
+            wget -q -O "_worker.js" "$DOWNLOAD_URL"
+          fi
+          
           echo "$TAG_NAME" > version.txt
           log "更新完成，新版本: $TAG_NAME"
 
